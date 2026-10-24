@@ -79,6 +79,27 @@ def _stooq_symbol(ticker):
     return ticker.lower()
 
 
+def _yahoo_chart_api(ticker):
+    """Call Yahoo's public chart endpoint directly with a browser-like header."""
+    import requests
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(ticker)}?range=3mo&interval=1d"
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
+    resp.raise_for_status()
+    result = resp.json()["chart"]["result"][0]
+    quote_data = result["indicators"]["quote"][0]
+    df = pd.DataFrame(
+        {
+            "Open": quote_data["open"],
+            "High": quote_data["high"],
+            "Low": quote_data["low"],
+            "Close": quote_data["close"],
+        },
+        index=pd.to_datetime(result["timestamp"], unit="s").normalize(),
+    ).dropna()
+    return df
+
+
 @st.cache_data(ttl=600)
 def fetch_prices(ticker):
     """Try Yahoo (yfinance) first, then fall back to Stooq daily prices."""
@@ -87,6 +108,12 @@ def fetch_prices(ticker):
         if not prices.empty:
             prices.index = pd.to_datetime(prices.index).tz_localize(None).normalize()
             return prices, "Yahoo Finance"
+    except Exception:
+        pass
+    try:
+        prices = _yahoo_chart_api(ticker)
+        if not prices.empty:
+            return prices, "Yahoo chart API"
     except Exception:
         pass
     try:
@@ -148,14 +175,15 @@ if news.empty:
         "temporarily blocking requests. Try again in a minute or try another symbol."
     )
     st.stop()
-if prices.empty:
+has_prices = not prices.empty
+if has_prices:
+    st.caption(f"Data sources: news from {news_source}, prices from {price_source}.")
+else:
     st.warning(
-        "Could not load price data for this ticker. The price source may be "
-        "temporarily blocking requests. Try again in a minute or try another symbol."
+        "Price data is temporarily unavailable (the free server's price sources are "
+        "blocking requests). Showing the news sentiment analysis only."
     )
-    st.stop()
-
-st.caption(f"Data sources: news from {news_source}, prices from {price_source}.")
+    st.caption(f"Data source: news from {news_source}.")
 
 news = news.dropna(subset=["published"]).copy()
 news["sentiment"] = score_headlines(news["headline"])
@@ -178,26 +206,42 @@ with tab1:
     c2.metric("Bullish / Bearish headlines", f"{bullish} / {bearish}")
     c3.metric("24-hour sentiment shift", f"{shift:+.2f}" if shift is not None else "n/a")
 
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Candlestick(
-            x=prices.index,
-            open=prices["Open"],
-            high=prices["High"],
-            low=prices["Low"],
-            close=prices["Close"],
-            name="Price",
-        ),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Bar(x=daily.index, y=daily.values, name="Avg daily sentiment", opacity=0.6),
-        secondary_y=True,
-    )
-    fig.update_layout(height=550, xaxis_rangeslider_visible=False, title=f"{ticker}: price vs news sentiment")
-    fig.update_yaxes(title_text="Price", secondary_y=False)
-    fig.update_yaxes(title_text="Sentiment (-1 to +1)", range=[-1, 1], secondary_y=True)
-    st.plotly_chart(fig, use_container_width=True)
+    if has_prices:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Candlestick(
+                x=prices.index,
+                open=prices["Open"],
+                high=prices["High"],
+                low=prices["Low"],
+                close=prices["Close"],
+                name="Price",
+            ),
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Bar(x=daily.index, y=daily.values, name="Avg daily sentiment", opacity=0.6),
+            secondary_y=True,
+        )
+        fig.update_layout(height=550, xaxis_rangeslider_visible=False, title=f"{ticker}: price vs news sentiment")
+        fig.update_yaxes(title_text="Price", secondary_y=False)
+        fig.update_yaxes(title_text="Sentiment (-1 to +1)", range=[-1, 1], secondary_y=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        bar = go.Figure(
+            go.Bar(
+                x=news["published"],
+                y=news["sentiment"],
+                marker_color=["#2ca02c" if v >= 0 else "#d62728" for v in news["sentiment"]],
+            )
+        )
+        bar.update_layout(
+            height=450,
+            title=f"{ticker}: sentiment of each headline over time",
+            yaxis=dict(title="Sentiment (-1 to +1)", range=[-1, 1]),
+        )
+        st.plotly_chart(bar, use_container_width=True)
 
     st.subheader("Scored headlines")
     st.dataframe(
@@ -213,8 +257,10 @@ with tab2:
     )
     buy_th = st.slider("Buy threshold", 0.0, 1.0, 0.3, 0.05)
     sell_th = st.slider("Sell threshold", -1.0, 0.0, -0.3, 0.05)
-    result = run_backtest(prices, daily, buy_th, sell_th)
-    if result is None:
+    result = run_backtest(prices, daily, buy_th, sell_th) if has_prices else None
+    if not has_prices:
+        st.info("Backtest needs price data, which is temporarily unavailable. Try again later.")
+    elif result is None:
         st.info("Not enough overlapping news and price days to simulate.")
     else:
         m1, m2 = st.columns(2)
