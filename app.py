@@ -30,10 +30,11 @@ def score_headlines(headlines):
 
 
 # ---------- 2. News fetcher ----------
-@st.cache_data(ttl=600)
-def fetch_news(ticker):
-    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={quote(ticker)}&region=US&lang=en-US"
-    feed = feedparser.parse(url)
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+
+def _parse_feed(url):
+    feed = feedparser.parse(url, agent=USER_AGENT)
     rows = []
     for entry in feed.entries:
         rows.append(
@@ -47,12 +48,56 @@ def fetch_news(ticker):
 
 
 @st.cache_data(ttl=600)
+def fetch_news(ticker):
+    """Try Yahoo Finance RSS first, then fall back to Google News RSS
+    (Yahoo often blocks requests coming from cloud servers)."""
+    try:
+        news = _parse_feed(
+            f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={quote(ticker)}&region=US&lang=en-US"
+        )
+        if not news.empty:
+            return news, "Yahoo Finance RSS"
+    except Exception:
+        pass
+    try:
+        query = quote(f"{ticker} stock")
+        news = _parse_feed(f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en")
+        if not news.empty:
+            return news.head(30), "Google News RSS"
+    except Exception:
+        pass
+    return pd.DataFrame(), "none"
+
+
+def _stooq_symbol(ticker):
+    if ticker == "^GSPC":
+        return "^spx"
+    if ticker.endswith("-USD"):
+        return ticker[:-4].lower() + ".v"
+    if "." not in ticker and not ticker.startswith("^"):
+        return ticker.lower() + ".us"
+    return ticker.lower()
+
+
+@st.cache_data(ttl=600)
 def fetch_prices(ticker):
-    prices = yf.Ticker(ticker).history(period="3mo", interval="1d")
-    if prices.empty:
-        return prices
-    prices.index = pd.to_datetime(prices.index).tz_localize(None).normalize()
-    return prices
+    """Try Yahoo (yfinance) first, then fall back to Stooq daily prices."""
+    try:
+        prices = yf.Ticker(ticker).history(period="3mo", interval="1d")
+        if not prices.empty:
+            prices.index = pd.to_datetime(prices.index).tz_localize(None).normalize()
+            return prices, "Yahoo Finance"
+    except Exception:
+        pass
+    try:
+        url = f"https://stooq.com/q/d/l/?s={_stooq_symbol(ticker)}&i=d"
+        prices = pd.read_csv(url, parse_dates=["Date"], index_col="Date").sort_index()
+        prices = prices.tail(90)
+        if not prices.empty and "Close" in prices.columns:
+            return prices, "Stooq"
+    except Exception:
+        pass
+    return pd.DataFrame(), "none"
 
 
 # ---------- 3. Backtest ----------
@@ -94,12 +139,23 @@ st.sidebar.info("Educational project. Not financial advice.")
 if not ticker:
     st.stop()
 
-news = fetch_news(ticker)
-prices = fetch_prices(ticker)
+news, news_source = fetch_news(ticker)
+prices, price_source = fetch_prices(ticker)
 
-if news.empty or prices.empty:
-    st.warning("No news or price data found for this ticker. Try another symbol.")
+if news.empty:
+    st.warning(
+        "Could not load news headlines for this ticker. The news source may be "
+        "temporarily blocking requests. Try again in a minute or try another symbol."
+    )
     st.stop()
+if prices.empty:
+    st.warning(
+        "Could not load price data for this ticker. The price source may be "
+        "temporarily blocking requests. Try again in a minute or try another symbol."
+    )
+    st.stop()
+
+st.caption(f"Data sources: news from {news_source}, prices from {price_source}.")
 
 news = news.dropna(subset=["published"]).copy()
 news["sentiment"] = score_headlines(news["headline"])
