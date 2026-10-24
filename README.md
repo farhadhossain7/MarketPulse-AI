@@ -4,7 +4,9 @@ An open-source financial news sentiment engine and backtest simulator.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue) ![Streamlit](https://img.shields.io/badge/Streamlit-app-red) ![HuggingFace](https://img.shields.io/badge/HuggingFace-FinBERT-yellow) ![License](https://img.shields.io/badge/License-MIT-green)
 
-**Live demo:** PASTE-YOUR-STREAMLIT-LINK-HERE
+**Live demo:** https://sentiment-market-lab.streamlit.app
+
+![Dashboard screenshot](screenshot1.png)
 
 ## What it does
 1. Pulls live financial headlines for a ticker from Yahoo Finance RSS.
